@@ -66,6 +66,8 @@ struct editorConfig E;
 
 /*** Prototypes ***/
 void editorSetStatusMessage(const char *fmt, ...);
+void editorRefreshScreen();
+char *editorPrompt(char *prompt);
 
 /*** Terminal ***/
 void die(const char *s) {
@@ -101,7 +103,7 @@ void enableRawMode() {
 int editorReadKey() {
     int nread;
     char c;
-    while ((nread = read(STDERR_FILENO, &c, 1)) != 1) {
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
         if (nread == -1 && errno != EAGAIN) die("read");
     }
 
@@ -136,7 +138,7 @@ int editorReadKey() {
                 }
             }
         }
-        else if (seq[0] == '0') {
+        else if (seq[0] == 'O') {
             switch (seq[1]) {
                 case 'H': return HOME_KEY;
                 case 'F': return END_KEY;
@@ -149,10 +151,29 @@ int editorReadKey() {
     }
 }
 
+int getCursorPosition(int *rows, int *cols) {
+    char buf[32];
+    unsigned int i = 0;
+
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+
+    while (i < sizeof(buf) - 1) {
+        if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
+        if (buf[i] == 'R') break;
+        i++;
+    }
+    buf[i] = '\0';
+    if (buf[0] != '\x1b' || buf[1] != '[') return -1;
+    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
+
+    return 0;
+}
+
 int getWindowSize(int *rows, int *cols) {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        return -1;
+        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+        return getCursorPosition(rows, cols);
     }
     else {
         *cols = ws.ws_col;
@@ -340,7 +361,13 @@ void editorOpen(char *filename) {
 }
 
 void editorSave() {
-    if (E.filename == NULL) return;
+    if (E.filename == NULL) {
+        E.filename = editorPrompt("Save as: %s (ESC to cancel)");
+        if (E.filename == NULL) {
+            editorSetStatusMessage("Save aborted");
+            return;
+        }
+    }
 
     int len;
     char *buf = editorRowsToString(&len);
@@ -352,14 +379,14 @@ void editorSave() {
                 close(fd);
                 free(buf);
                 E.dirty = 0;
-                editorSetStatusMessage("%d bytes writen to disk", len);
+                editorSetStatusMessage("%d bytes written to disk", len);
                 return;
             }
         }
     close(fd);
     }
     free(buf);
-    editorSetStatusMessage("Can't save! I/O error %s", strerror(errno));
+    editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
 /*** Append Buffer ***/
@@ -381,6 +408,43 @@ void abFree(struct abuf *ab) {
 }
 
 /*** Input ***/
+char *editorPrompt(char *prompt) {
+    size_t bufsize = 128;
+    char *buf = malloc(bufsize);
+
+    size_t buflen = 0;
+    buf[0] = '\0';
+
+    while(1) {
+        editorSetStatusMessage(prompt, buf);
+        editorRefreshScreen();
+
+        int c = editorReadKey();
+        if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+            if (buflen != 0) buf[--buflen] = '\0';
+        }
+        else if (c == '\x1b') {
+            editorSetStatusMessage("");
+            free(buf);
+            return NULL;
+        }
+        else if (c == '\r') {
+            if (buflen != 0) {
+                editorSetStatusMessage("");
+                return buf;
+            }
+            else if (!iscntrl(c) && c < 128) {
+                if (buflen == bufsize - 1) {
+                    bufsize *= 2;
+                    buf = realloc(buf, bufsize);
+                }
+                buf[buflen++] = c;
+                buf[buflen] = '\0';
+            }
+        }
+    }
+}
+
 void editorMoveCursor(int key) {
     erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
 
